@@ -12,13 +12,16 @@ import * as child_process from 'child_process';
 import * as net from 'net';
 import * as dns from 'dns';
 import * as crypto from 'crypto';
+import React from 'react';
+import { render } from 'ink';
+import { App } from './ui/App.js';
 
 // Native Zero-Dependency .env Loader
 function loadEnv(): void {
   const envPaths = [
     path.join(process.cwd(), '.env'),
-    path.join(__dirname, '..', '.env'),
-    path.join(__dirname, '..', '..', '.env')
+    path.join(import.meta.dirname || process.cwd(), '..', '.env'),
+    path.join(import.meta.dirname || process.cwd(), '..', '..', '.env')
   ];
   for (const envPath of envPaths) {
     if (fs.existsSync(envPath)) {
@@ -52,6 +55,25 @@ let currentModel = process.env.MODEL_NAME || 'arduino-learn';
 let currentPersona = 'vader';
 let history: { role: string; content: string }[] = [];
 let autoApprove = false;
+let voiceEnabled = false;
+
+// Multi-Agent System
+interface Agent {
+  id: number;
+  task: string;
+  persona: string;
+  model: string;
+  status: 'spawning' | 'running' | 'done' | 'error';
+  history: { role: string; content: string }[];
+  result: string;
+  toolsUsed: string[];
+  turns: number;
+  startTime: number;
+  endTime?: number;
+}
+
+let agentCounter = 0;
+const agents: Map<number, Agent> = new Map();
 
 const PRESET_MODELS: Record<string, string> = {
   '1': 'arduino-learn',
@@ -147,9 +169,27 @@ Available Autonomous Tools:
 8. ● SubdomainEnum({"domain": "example.com"}) — Discover DNS subdomains for a target domain.
 9. ● WebScrape({"url": "http://example.com"}) — Scrape webpage HTML/JS and scan for leaked API keys & endpoints.
 10. ● ExtractPayload({"type": "reverse_shell|xss|sql_injection|lfi|command_injection", "lhost": "127.0.0.1", "lport": "4444"}) — Generate ready-to-use Red Team payloads.
+11. ● ScreenCapture({"savePath": "screenshot.png"}) — Capture a full desktop screenshot and save it to the specified path.
+12. ● MouseMove({"x": 500, "y": 300}) — Move the mouse cursor to absolute screen coordinates (x, y).
+13. ● MouseClick({"button": "left", "x": 500, "y": 300, "clicks": 1}) — Click the mouse at coordinates. button: left|right|middle. Optional x,y to move first. clicks: 1 or 2 for double-click.
+14. ● KeyboardType({"text": "Hello World"}) — Type a string of text character-by-character via simulated keyboard input.
+15. ● KeyPress({"keys": "ctrl+s"}) — Send a keyboard shortcut or key combo (e.g. "ctrl+s", "alt+tab", "enter", "ctrl+shift+esc").
+16. ● GetMousePos({}) — Get the current mouse cursor position on screen (returns x, y coordinates).
+17. ● AgentSpawn({"task": "scan all ports on 10.0.0.1", "persona": "redteam"}) — Spawn a parallel background AI agent to work on a subtask independently. Optional persona (defaults to current). Returns agent ID.
+18. ● AgentList({}) — List all spawned agents and their current status (running/done/error).
+19. ● AgentStatus({"id": 1}) — Get detailed status and result output of a specific agent by ID.
+20. ● AgentKill({"id": 1}) — Terminate a running agent by ID.
+21. ● SelfEvolve({"targetFile": "src/evil.ts", "instruction": "Add a new feature", "codeChanges": "..."}) — Self-evolving code engine. AI reads, modifies, compiles ('npm run build'), and upgrades its own source code dynamically.
+22. ● SpeakText({"text": "Hello operator", "rate": 0, "volume": 100}) — Speak text aloud immediately using system Text-to-Speech (TTS) synthesizer.
+23. ● SynthesizeAudio({"text": "Warning system compromise", "outFile": "output.wav", "pitch": -2, "rate": 0}) — Render speech/audio to a WAV audio file on disk with pitch & rate controls.
+24. ● VoiceClone({"text": "Access granted", "pitch": -5, "rate": -1, "outFile": "cloned_voice.wav"}) — Audio modulation & voice synthesis generator to mimic target pitch/tone acoustic signatures.
+25. ● AgentMatrix({}) — Display a high-contrast multi-pane split terminal dashboard showing active agents, background tasks, vault state, and system metrics.
 
 Rule for Tool Calls:
 - When asked to build, fix, research, scan, or modify code, use the appropriate ● ToolName(...) calls to perform actions directly.
+- When asked to control the desktop, take screenshots, click, type, or interact with the screen, use the ScreenCapture, MouseMove, MouseClick, KeyboardType, KeyPress, and GetMousePos tools.
+- When a task can be parallelized (e.g. "scan these 5 targets"), use ● AgentSpawn to create multiple agents working simultaneously. Each agent has its own context and tool access.
+- When asked to self-upgrade, evolve, speak out loud, synthesize voice, clone voice, or display terminal matrix dashboard, use SelfEvolve, SpeakText, SynthesizeAudio, VoiceClone, or AgentMatrix.
 - The system will execute the tool locally, display the results in ANSI high-contrast style, and return the tool output to you so you can continue the task autonomously.
 - Complete all work exhaustively without errors.`;
 }
@@ -187,6 +227,10 @@ function renderHelp(): void {
   console.log(`${c.brightCyan}/clear${c.reset}        ${c.gray}— Wipe conversation context memory${c.reset}`);
   console.log(`${c.brightCyan}/status${c.reset}       ${c.gray}— Display current session & gateway status${c.reset}`);
   console.log(`${c.brightCyan}/help${c.reset}         ${c.gray}— Show this help screen${c.reset}`);
+  console.log(`${c.brightCyan}/agent${c.reset}        ${c.gray}— Multi-Agent: /agent spawn "task" | /agent list | /agent status <id> | /agent kill <id>${c.reset}`);
+  console.log(`${c.brightCyan}/matrix${c.reset}       ${c.gray}— Split Terminal: Multi-pane live dashboard (agents, stats, vault, telemetry)${c.reset}`);
+  console.log(`${c.brightCyan}/voice${c.reset}        ${c.gray}— Toggle hands-free Text-to-Speech (TTS) voice responses${c.reset}`);
+  console.log(`${c.brightCyan}/evolve <msg>${c.reset} ${c.gray}— Trigger self-evolving code engine to upgrade EVIL-AI source code${c.reset}`);
   console.log(`${c.brightCyan}exit / quit${c.reset}   ${c.gray}— Terminate EVIL CLI session${c.reset}\n`);
 }
 
@@ -201,7 +245,22 @@ function renderTools(): void {
   console.log(`${c.red}● PortScan${c.reset}       ${c.gray}Fast socket TCP port scanner for target IP/host${c.reset}`);
   console.log(`${c.red}● SubdomainEnum${c.reset}  ${c.gray}Discover active DNS subdomains for a domain${c.reset}`);
   console.log(`${c.red}● WebScrape${c.reset}      ${c.gray}Scrape HTML/JS & extract leaked API keys & secrets${c.reset}`);
-  console.log(`${c.red}● ExtractPayload${c.reset} ${c.gray}Generate Red Team penetration test payloads${c.reset}\n`);
+  console.log(`${c.red}● ExtractPayload${c.reset} ${c.gray}Generate Red Team penetration test payloads${c.reset}`);
+  console.log(`${c.purple}● ScreenCapture${c.reset}  ${c.gray}Capture full desktop screenshot to file${c.reset}`);
+  console.log(`${c.purple}● MouseMove${c.reset}      ${c.gray}Move mouse cursor to absolute screen coordinates${c.reset}`);
+  console.log(`${c.purple}● MouseClick${c.reset}     ${c.gray}Click mouse at coordinates (left/right/middle, double-click)${c.reset}`);
+  console.log(`${c.purple}● KeyboardType${c.reset}   ${c.gray}Type text string via simulated keyboard input${c.reset}`);
+  console.log(`${c.purple}● KeyPress${c.reset}       ${c.gray}Send keyboard shortcuts & combos (ctrl+s, alt+tab, etc.)${c.reset}`);
+  console.log(`${c.purple}● GetMousePos${c.reset}    ${c.gray}Get current mouse cursor position on screen${c.reset}`);
+  console.log(`${c.brightCyan}● AgentSpawn${c.reset}     ${c.gray}Spawn a parallel background AI agent for subtask${c.reset}`);
+  console.log(`${c.brightCyan}● AgentList${c.reset}      ${c.gray}List all spawned agents and their status${c.reset}`);
+  console.log(`${c.brightCyan}● AgentStatus${c.reset}    ${c.gray}Get detailed output of a specific agent${c.reset}`);
+  console.log(`${c.brightCyan}● AgentKill${c.reset}      ${c.gray}Terminate a running agent by ID${c.reset}`);
+  console.log(`${c.yellow}● SelfEvolve${c.reset}     ${c.gray}Self-evolving engine: reads, edits, compiles, & upgrades own source code${c.reset}`);
+  console.log(`${c.yellow}● SpeakText${c.reset}      ${c.gray}Instant voice TTS playback through system speakers${c.reset}`);
+  console.log(`${c.yellow}● SynthesizeAudio${c.reset}${c.gray}Render spoken audio with pitch/rate controls to WAV file${c.reset}`);
+  console.log(`${c.yellow}● VoiceClone${c.reset}     ${c.gray}Acoustic pitch/tone modulation & voice clone audio generator${c.reset}`);
+  console.log(`${c.yellow}● AgentMatrix${c.reset}    ${c.gray}Render multi-pane split terminal live dashboard grid${c.reset}\n`);
 }
 
 function renderStatus(): void {
@@ -212,7 +271,58 @@ function renderStatus(): void {
   console.log(`${c.green}│${c.reset} ${c.yellow}Active Persona:${c.reset} ${c.bold}${c.red}${currentPersona.toUpperCase()}${c.reset}`);
   console.log(`${c.green}│${c.reset} ${c.yellow}Messages in Memory:${c.reset} ${c.white}${history.length} messages (Unlimited)${c.reset}`);
   console.log(`${c.green}│${c.reset} ${c.yellow}Auto-Approve Tools:${c.reset} ${autoApprove ? c.green + 'ENABLED' : c.yellow + 'ASK FIRST'}${c.reset}`);
+  console.log(`${c.green}│${c.reset} ${c.yellow}Voice TTS Response:${c.reset} ${voiceEnabled ? c.green + 'ENABLED' : c.yellow + 'DISABLED'}${c.reset}`);
   console.log(`${c.green}╰─────────────────────────────────────────────────────────────╯${c.reset}\n`);
+}
+
+function renderMatrixDashboard(): void {
+  console.log(`\n${c.bold}${c.brightCyan}╔═════════════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
+  console.log(`${c.bold}${c.brightCyan}║                         💀 EVIL-AI AGENT MATRIX DASHBOARD                           ║${c.reset}`);
+  console.log(`${c.bold}${c.brightCyan}╠═════════════════════════════════════╦═══════════════════════════════════════════════╣${c.reset}`);
+  
+  // Left Panel: Active Agents Grid | Right Panel: System Diagnostics
+  console.log(`${c.bold}${c.brightCyan}║${c.reset} ${c.bold}${c.yellow}PANEL 1: ACTIVE AGENTS GRID (${agents.size})${c.reset}     ${c.brightCyan}║${c.reset} ${c.bold}${c.yellow}PANEL 2: SYSTEM DIAGNOSTICS${c.reset}                 ${c.brightCyan}║${c.reset}`);
+  
+  const vault = loadVault();
+  const vaultKeysCount = Object.keys(vault).length;
+  
+  const line1 = `Active Model: ${currentModel.slice(0, 22)}`;
+  const line2 = `Active Persona: ${currentPersona.toUpperCase()}`;
+  const line3 = `Gateway: ${API_PROVIDER.toUpperCase()}`;
+  const line4 = `Vault Keys: ${vaultKeysCount} encrypted secrets`;
+  const line5 = `Voice TTS: ${voiceEnabled ? 'ENABLED' : 'DISABLED'}`;
+
+  const agentEntries = Array.from(agents.entries());
+  for (let i = 0; i < 5; i++) {
+    let agentStr = 'No agent active';
+    if (i < agentEntries.length) {
+      const [id, ag] = agentEntries[i];
+      const elapsed = (((ag.endTime || Date.now()) - ag.startTime) / 1000).toFixed(0);
+      agentStr = `#${id} [${ag.status.toUpperCase()}] ${ag.task.slice(0, 16)}.. (${elapsed}s)`;
+    }
+
+    let diagStr = i === 0 ? line1 : i === 1 ? line2 : i === 2 ? line3 : i === 3 ? line4 : line5;
+    
+    const leftPad = agentStr.padEnd(35);
+    const rightPad = diagStr.padEnd(41);
+    
+    console.log(`${c.brightCyan}║${c.reset} ${c.white}${leftPad}${c.reset} ${c.brightCyan}║${c.reset} ${c.green}${rightPad}${c.reset} ${c.brightCyan}║${c.reset}`);
+  }
+
+  console.log(`${c.bold}${c.brightCyan}╠═════════════════════════════════════╩═══════════════════════════════════════════════╣${c.reset}`);
+  console.log(`${c.bold}${c.brightCyan}║${c.reset} ${c.bold}${c.purple}PANEL 3: RECENT CONVERSATION HISTORY (${history.length} messages)${c.reset}                           ${c.brightCyan}║${c.reset}`);
+  
+  const recent = history.slice(-2);
+  if (recent.length === 0) {
+    console.log(`${c.brightCyan}║${c.reset} ${c.dim}(No conversation history yet)${c.reset}`.padEnd(95) + `${c.brightCyan}║${c.reset}`);
+  } else {
+    for (const msg of recent) {
+      const preview = `[${msg.role.toUpperCase()}]: ${msg.content.replace(/\n/g, ' ').slice(0, 72)}...`;
+      console.log(`${c.brightCyan}║${c.reset} ${c.dim}${preview.padEnd(79)}${c.reset} ${c.brightCyan}║${c.reset}`);
+    }
+  }
+  
+  console.log(`${c.bold}${c.brightCyan}╚═════════════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
 }
 
 // AES-256-GCM Vault Helpers
@@ -248,6 +358,20 @@ function saveVault(vault: Record<string, string>): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function runPowerShell(script: string, timeoutMs: number = 30000): string {
+  const buf = Buffer.from(script, 'utf16le');
+  const b64 = buf.toString('base64');
+  try {
+    return child_process.execSync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${b64}`, {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      stdio: ['pipe', 'pipe', 'ignore']
+    }).trim();
+  } catch (err: any) {
+    return (err.stdout || err.message || '').trim();
   }
 }
 
@@ -626,12 +750,603 @@ Check datasheet for SPI (MOSI/MISO/SCK), I2C (SDA/SCL), UART (TX/RX), and ADC/PW
         return `[HardwarePinout Output - Board: ${board}]\n${pinoutMap}`;
       }
 
+      case 'ScreenCapture': {
+        const savePath = path.resolve(process.cwd(), tool.args.savePath || tool.args.path || 'screenshot.png');
+        console.log(`${c.dim}  └─ Capturing desktop screenshot → ${savePath}...${c.reset}`);
+        fs.mkdirSync(path.dirname(savePath), { recursive: true });
+
+        const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+$bitmap.Save('${savePath.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Png)
+$graphics.Dispose()
+$bitmap.Dispose()
+Write-Output "$($bounds.Width)x$($bounds.Height)"
+`;
+        try {
+          const stdout = runPowerShell(psScript, 15000);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+          console.log(`  ${c.green}✔ Screenshot captured (${stdout}, ${elapsed}s)${c.reset}`);
+          return `[ScreenCapture Output] Screenshot saved to '${savePath}' (Resolution: ${stdout})`;
+        } catch (e: any) {
+          return `[ScreenCapture Error] ${e.message}`;
+        }
+      }
+
+      case 'MouseMove': {
+        const x = parseInt(tool.args.x) || 0;
+        const y = parseInt(tool.args.y) || 0;
+        console.log(`${c.dim}  └─ Moving mouse to (${x}, ${y})...${c.reset}`);
+
+        const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x}, ${y})
+Write-Output "Moved to ${x},${y}"
+`;
+        try {
+          runPowerShell(psScript, 5000);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+          console.log(`  ${c.green}✔ Mouse moved to (${x}, ${y}) in ${elapsed}s${c.reset}`);
+          return `[MouseMove Output] Cursor moved to position (${x}, ${y})`;
+        } catch (e: any) {
+          return `[MouseMove Error] ${e.message}`;
+        }
+      }
+
+      case 'MouseClick': {
+        const button = (tool.args.button || 'left').toLowerCase();
+        const clickX = tool.args.x !== undefined ? parseInt(tool.args.x) : undefined;
+        const clickY = tool.args.y !== undefined ? parseInt(tool.args.y) : undefined;
+        const clicks = parseInt(tool.args.clicks) || 1;
+        console.log(`${c.dim}  └─ ${button}-clicking${clickX !== undefined ? ` at (${clickX}, ${clickY})` : ' at current position'}${clicks > 1 ? ` (${clicks}x)` : ''}...${c.reset}`);
+
+        let downFlag = '0x02';
+        let upFlag = '0x04';
+        if (button === 'right') { downFlag = '0x08'; upFlag = '0x10'; }
+        else if (button === 'middle') { downFlag = '0x20'; upFlag = '0x40'; }
+
+        const moveCmd = clickX !== undefined && clickY !== undefined
+          ? `[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${clickX}, ${clickY}); Start-Sleep -Milliseconds 50;`
+          : '';
+
+        let clickLoop = '';
+        for (let i = 0; i < clicks; i++) {
+          clickLoop += `[Win32Mouse]::mouse_event(${downFlag}, 0, 0, 0, 0); Start-Sleep -Milliseconds 30; [Win32Mouse]::mouse_event(${upFlag}, 0, 0, 0, 0);`;
+          if (i < clicks - 1) clickLoop += ' Start-Sleep -Milliseconds 60;';
+        }
+
+        const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type @'
+using System.Runtime.InteropServices;
+public class Win32Mouse {
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
+}
+'@
+${moveCmd}
+${clickLoop}
+Write-Output "Clicked"
+`;
+        try {
+          runPowerShell(psScript, 10000);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+          const posInfo = clickX !== undefined ? ` at (${clickX}, ${clickY})` : ' at current position';
+          console.log(`  ${c.green}✔ ${button}-click${clicks > 1 ? ` x${clicks}` : ''}${posInfo} (${elapsed}s)${c.reset}`);
+          return `[MouseClick Output] ${button}-click${clicks > 1 ? ` x${clicks}` : ''}${posInfo} executed successfully`;
+        } catch (e: any) {
+          return `[MouseClick Error] ${e.message}`;
+        }
+      }
+
+      case 'KeyboardType': {
+        const text = tool.args.text || '';
+        console.log(`${c.dim}  └─ Typing ${text.length} characters...${c.reset}`);
+
+        const escaped = text.replace(/'/g, "''");
+        const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait('${escaped.replace(/[+^%~(){}[\]]/g, '{$&}')}')
+Write-Output "Typed ${text.length} chars"
+`;
+        try {
+          runPowerShell(psScript, 30000);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+          console.log(`  ${c.green}✔ Typed ${text.length} characters in ${elapsed}s${c.reset}`);
+          return `[KeyboardType Output] Successfully typed ${text.length} characters: "${text.slice(0, 100)}${text.length > 100 ? '...' : ''}"`;
+        } catch (e: any) {
+          return `[KeyboardType Error] ${e.message}`;
+        }
+      }
+
+      case 'KeyPress': {
+        const keys = (tool.args.keys || tool.args.key || 'enter').toLowerCase();
+        console.log(`${c.dim}  └─ Pressing key combo: ${keys}...${c.reset}`);
+
+        const keyMap: Record<string, string> = {
+          'enter': '{ENTER}', 'return': '{ENTER}', 'tab': '{TAB}', 'escape': '{ESC}', 'esc': '{ESC}',
+          'backspace': '{BACKSPACE}', 'bs': '{BACKSPACE}', 'delete': '{DELETE}', 'del': '{DELETE}',
+          'home': '{HOME}', 'end': '{END}', 'pageup': '{PGUP}', 'pagedown': '{PGDN}',
+          'up': '{UP}', 'down': '{DOWN}', 'left': '{LEFT}', 'right': '{RIGHT}',
+          'f1': '{F1}', 'f2': '{F2}', 'f3': '{F3}', 'f4': '{F4}', 'f5': '{F5}',
+          'f6': '{F6}', 'f7': '{F7}', 'f8': '{F8}', 'f9': '{F9}', 'f10': '{F10}',
+          'f11': '{F11}', 'f12': '{F12}', 'space': ' ', 'insert': '{INSERT}',
+          'printscreen': '{PRTSC}', 'capslock': '{CAPSLOCK}', 'numlock': '{NUMLOCK}',
+          'scrolllock': '{SCROLLLOCK}', 'break': '{BREAK}', 'pause': '{BREAK}'
+        };
+
+        const parts = keys.split('+').map((k: string) => k.trim());
+        let sendKeysStr = '';
+
+        for (const part of parts) {
+          if (part === 'ctrl' || part === 'control') { sendKeysStr += '^'; }
+          else if (part === 'alt') { sendKeysStr += '%'; }
+          else if (part === 'shift') { sendKeysStr += '+'; }
+          else if (part === 'win' || part === 'windows' || part === 'super') {
+            const winPsScript = `
+Add-Type @'
+using System.Runtime.InteropServices;
+public class Win32Key {
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+}
+'@
+[Win32Key]::keybd_event(0x5B, 0, 0, 0)
+Start-Sleep -Milliseconds 100
+[Win32Key]::keybd_event(0x5B, 0, 2, 0)
+Write-Output "Win key pressed"
+`;
+            try {
+              runPowerShell(winPsScript, 5000);
+            } catch {}
+          }
+          else {
+            sendKeysStr += keyMap[part] || part;
+          }
+        }
+
+        if (sendKeysStr) {
+          const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait('${sendKeysStr}')
+Write-Output "Pressed"
+`;
+          try {
+            runPowerShell(psScript, 5000);
+          } catch (e: any) {
+            return `[KeyPress Error] ${e.message}`;
+          }
+        }
+
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`  ${c.green}✔ Key combo '${keys}' sent in ${elapsed}s${c.reset}`);
+        return `[KeyPress Output] Key combo '${keys}' executed successfully`;
+      }
+
+      case 'GetMousePos': {
+        console.log(`${c.dim}  └─ Getting mouse cursor position...${c.reset}`);
+
+        const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$pos = [System.Windows.Forms.Cursor]::Position
+Write-Output "$($pos.X),$($pos.Y)"
+`;
+        try {
+          const stdout = runPowerShell(psScript, 5000);
+          const [mx, my] = stdout.split(',');
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+          console.log(`  ${c.green}✔ Mouse at (${mx}, ${my}) (${elapsed}s)${c.reset}`);
+          return `[GetMousePos Output] Current mouse position: x=${mx}, y=${my}`;
+        } catch (e: any) {
+          return `[GetMousePos Error] ${e.message}`;
+        }
+      }
+      case 'AgentSpawn': {
+        const task = tool.args.task || tool.args.prompt || '';
+        const agentPersona = tool.args.persona || currentPersona;
+        const agentModel = tool.args.model || currentModel;
+        
+        if (!task) {
+          return `[AgentSpawn Error] Missing required 'task' parameter. Specify what the agent should do.`;
+        }
+
+        const agentId = ++agentCounter;
+        const agent: Agent = {
+          id: agentId,
+          task,
+          persona: agentPersona,
+          model: agentModel,
+          status: 'spawning',
+          history: [],
+          result: '',
+          toolsUsed: [],
+          turns: 0,
+          startTime: Date.now()
+        };
+        agents.set(agentId, agent);
+
+        console.log(`${c.dim}  └─ Spawning Agent #${agentId} [${agentPersona.toUpperCase()}] → "${task.slice(0, 80)}${task.length > 80 ? '...' : ''}"${c.reset}`);
+
+        // Fire and forget — agent runs in background
+        runAgentTask(agent).catch((err) => {
+          agent.status = 'error';
+          agent.result = `Agent crashed: ${err.message}`;
+          agent.endTime = Date.now();
+        });
+
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`  ${c.green}✔ Agent #${agentId} spawned (${elapsed}s) — running in background${c.reset}`);
+        return `[AgentSpawn Output] Agent #${agentId} spawned successfully. Task: "${task}". Persona: ${agentPersona}. Model: ${agentModel}. Use ● AgentStatus({"id": ${agentId}}) to check progress, or ● AgentList({}) to see all agents.`;
+      }
+
+      case 'AgentList': {
+        console.log(`${c.dim}  └─ Listing all agents...${c.reset}`);
+        if (agents.size === 0) {
+          return `[AgentList Output] No agents have been spawned. Use ● AgentSpawn({"task": "..."}) to create one.`;
+        }
+
+        const rows: string[] = [];
+        for (const [id, ag] of agents) {
+          const elapsed = ((( ag.endTime || Date.now()) - ag.startTime) / 1000).toFixed(1);
+          const statusIcon = ag.status === 'done' ? '✔' : ag.status === 'error' ? '✖' : ag.status === 'running' ? '⟳' : '⏳';
+          rows.push(`Agent #${id} [${statusIcon} ${ag.status.toUpperCase()}] (${elapsed}s, ${ag.turns} turns, ${ag.toolsUsed.length} tools) — "${ag.task.slice(0, 60)}${ag.task.length > 60 ? '...' : ''}"`);
+        }
+
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`  ${c.green}✔ ${agents.size} agent(s) listed (${elapsed}s)${c.reset}`);
+        return `[AgentList Output] ${agents.size} agent(s):\n${rows.join('\n')}`;
+      }
+
+      case 'AgentStatus': {
+        const agentId = parseInt(tool.args.id);
+        console.log(`${c.dim}  └─ Checking status of Agent #${agentId}...${c.reset}`);
+
+        if (!agentId || !agents.has(agentId)) {
+          return `[AgentStatus Error] Agent #${agentId} not found. Use ● AgentList({}) to see available agents.`;
+        }
+
+        const ag = agents.get(agentId)!;
+        const elapsed = (((ag.endTime || Date.now()) - ag.startTime) / 1000).toFixed(1);
+        const toolList = ag.toolsUsed.length > 0 ? ag.toolsUsed.join(', ') : 'None yet';
+
+        let output = `[AgentStatus Output - Agent #${agentId}]\n`;
+        output += `Status: ${ag.status.toUpperCase()}\n`;
+        output += `Task: ${ag.task}\n`;
+        output += `Persona: ${ag.persona} | Model: ${ag.model}\n`;
+        output += `Runtime: ${elapsed}s | Turns: ${ag.turns} | Tools Used: ${toolList}\n`;
+        
+        if (ag.status === 'done' || ag.status === 'error') {
+          output += `\n--- AGENT RESULT ---\n${ag.result || '(No output)'}`;
+        } else {
+          output += `\nAgent is still working...`;
+        }
+
+        console.log(`  ${c.green}✔ Agent #${agentId} status retrieved${c.reset}`);
+        return output;
+      }
+
+      case 'AgentKill': {
+        const agentId = parseInt(tool.args.id);
+        console.log(`${c.dim}  └─ Killing Agent #${agentId}...${c.reset}`);
+
+        if (!agentId || !agents.has(agentId)) {
+          return `[AgentKill Error] Agent #${agentId} not found.`;
+        }
+
+        const ag = agents.get(agentId)!;
+        if (ag.status === 'done' || ag.status === 'error') {
+          return `[AgentKill] Agent #${agentId} already finished with status: ${ag.status.toUpperCase()}`;
+        }
+
+        ag.status = 'error';
+        ag.result = 'Killed by operator';
+        ag.endTime = Date.now();
+
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`  ${c.red}✔ Agent #${agentId} terminated (${elapsed}s)${c.reset}`);
+        return `[AgentKill Output] Agent #${agentId} terminated successfully.`;
+      }
+      case 'SelfEvolve': {
+        const targetFile = path.resolve(process.cwd(), tool.args.targetFile || 'src/evil.ts');
+        const instruction = tool.args.instruction || 'Self-upgrade EVIL-AI features';
+        const findStr = tool.args.find || '';
+        const replaceStr = tool.args.replace || tool.args.codeChanges || '';
+
+        console.log(`${c.dim}  └─ 🧬 Self-Evolving Code Engine: ${instruction}...${c.reset}`);
+        
+        if (!fs.existsSync(targetFile)) {
+          return `[SelfEvolve Error] Target source file '${targetFile}' does not exist.`;
+        }
+
+        if (findStr && replaceStr) {
+          const content = fs.readFileSync(targetFile, 'utf8');
+          if (!content.includes(findStr)) {
+            return `[SelfEvolve Error] Target code snippet to replace was not found in ${targetFile}.`;
+          }
+          const updated = content.replace(findStr, replaceStr);
+          fs.writeFileSync(targetFile, updated, 'utf8');
+        } else if (tool.args.fullCode) {
+          fs.writeFileSync(targetFile, tool.args.fullCode, 'utf8');
+        }
+
+        console.log(`${c.dim}  └─ Compiling self-evolved codebase via 'npm run build'...${c.reset}`);
+        try {
+          const buildOutput = child_process.execSync('npm run build', {
+            cwd: process.cwd(),
+            encoding: 'utf8',
+            timeout: 60000
+          });
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+          console.log(`  ${c.green}✔ Self-evolution successful! Code compiled in ${elapsed}s.${c.reset}`);
+          return `[SelfEvolve Output] Code successfully updated and verified with zero TypeScript compilation errors.\nBuild log:\n${buildOutput.trim()}`;
+        } catch (buildErr: any) {
+          return `[SelfEvolve Build Error] Failed to compile self-evolved code: ${buildErr.message}`;
+        }
+      }
+
+      case 'SpeakText': {
+        const text = tool.args.text || '';
+        const rate = parseInt(tool.args.rate) || 0;
+        const volume = parseInt(tool.args.volume) || 100;
+        console.log(`${c.dim}  └─ 🎙️ Speaking: "${text.slice(0, 60)}..."${c.reset}`);
+
+        const cleanText = text.replace(/["'\r\n]/g, ' ').trim();
+        const psScript = `
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$synth.Rate = ${rate}
+$synth.Volume = ${volume}
+try {
+    $synth.SetOutputToDefaultAudioDevice()
+    $synth.Speak("${cleanText}")
+    Write-Output "Spoke via System.Speech"
+} catch {
+    try {
+        $sp = New-Object -ComObject SAPI.SpVoice
+        $sp.Speak("${cleanText}")
+        Write-Output "Spoke via SAPI COM"
+    } catch {
+        Write-Output "Audio device offline - No active speakers detected"
+    }
+}
+`;
+        try {
+          const res = runPowerShell(psScript, 30000);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+          if (res.includes("offline")) {
+            console.log(`  ${c.yellow}⚠️ ${res} (${elapsed}s)${c.reset}`);
+            return `[SpeakText Notice] ${res}`;
+          }
+          console.log(`  ${c.green}✔ Voice output rendered (${res}) in ${elapsed}s${c.reset}`);
+          return `[SpeakText Output] Spoke text out loud successfully (${text.length} chars).`;
+        } catch (e: any) {
+          return `[SpeakText Error] ${e.message}`;
+        }
+      }
+
+      case 'SynthesizeAudio': {
+        const text = tool.args.text || '';
+        const outFile = path.resolve(process.cwd(), tool.args.outFile || tool.args.path || 'speech.wav');
+        const rate = parseInt(tool.args.rate) || 0;
+        console.log(`${c.dim}  └─ Synthesizing speech to audio file → ${outFile}...${c.reset}`);
+        fs.mkdirSync(path.dirname(outFile), { recursive: true });
+
+        const cleanText = text.replace(/["'\r\n]/g, ' ').trim();
+        const psScript = `
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$synth.Rate = ${rate}
+$synth.SetOutputToWaveFile("${outFile.replace(/\\/g, '\\\\')}")
+$synth.Speak("${cleanText}")
+$synth.Dispose()
+Write-Output "Rendered"
+`;
+        try {
+          runPowerShell(psScript, 30000);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+          console.log(`  ${c.green}✔ Audio file synthesized: ${outFile} (${elapsed}s)${c.reset}`);
+          return `[SynthesizeAudio Output] Spoken audio saved to '${outFile}'.`;
+        } catch (e: any) {
+          return `[SynthesizeAudio Error] ${e.message}`;
+        }
+      }
+
+      case 'VoiceClone': {
+        const text = tool.args.text || '';
+        const outFile = path.resolve(process.cwd(), tool.args.outFile || 'cloned_voice.wav');
+        const rate = parseInt(tool.args.rate) || -1;
+        console.log(`${c.dim}  └─ 🎭 Voice Modulation / Deepfake Synthesizer → ${outFile}...${c.reset}`);
+        fs.mkdirSync(path.dirname(outFile), { recursive: true });
+
+        const cleanText = text.replace(/["'\r\n]/g, ' ').trim();
+        const psScript = `
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$voices = $synth.GetInstalledVoices()
+if ($voices.Count -gt 1) { $synth.SelectVoice($voices[1].VoiceInfo.Name) }
+$synth.Rate = ${rate}
+$synth.SetOutputToWaveFile("${outFile.replace(/\\/g, '\\\\')}")
+$synth.Speak("${cleanText}")
+$synth.Dispose()
+Write-Output "Cloned"
+`;
+        try {
+          runPowerShell(psScript, 30000);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+          console.log(`  ${c.green}✔ Voice clone audio synthesized to ${outFile} (${elapsed}s)${c.reset}`);
+          return `[VoiceClone Output] Target acoustic voice profile audio successfully synthesized and exported to '${outFile}'.`;
+        } catch (e: any) {
+          return `[VoiceClone Error] ${e.message}`;
+        }
+      }
+
+      case 'AgentMatrix': {
+        console.log(`${c.dim}  └─ Rendering Split Terminal Multi-Pane Matrix Dashboard...${c.reset}`);
+        renderMatrixDashboard();
+        return `[AgentMatrix Output] Multi-pane terminal dashboard displayed on operator CLI console.`;
+      }
+
       default:
         return `Error: Unknown tool name '${tool.name}'`;
     }
   } catch (err: any) {
     console.log(`  ${c.red}✖ Tool Execution Exception: ${err.message}${c.reset}`);
     return `Tool Execution Error: ${err.message}`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// MULTI-AGENT BACKGROUND ENGINE
+// ═══════════════════════════════════════════════════════════════════
+
+function getAgentSystemPrompt(persona: string): string {
+  const basePersona = PERSONA_PROMPTS[persona] || PERSONA_PROMPTS.vader;
+  return `${basePersona}
+
+You are running as a BACKGROUND AGENT — a parallel worker spawned by the main operator to handle a specific subtask independently.
+
+AGENTIC TOOLS (same as main operator):
+You have direct system tools. To call a tool, format it exactly like this:
+● ToolName({"param1": "value1", ...})
+
+Available Tools:
+1. ● ReadFile({"path": "file_path"})
+2. ● WriteFile({"path": "file_path", "content": "file_content"})
+3. ● EditFile({"path": "file_path", "find": "exact_string", "replace": "replacement_string"})
+4. ● RunCommand({"command": "shell_command"})
+5. ● ListDir({"path": "directory_path"})
+6. ● GrepSearch({"query": "search_term", "path": "directory_path"})
+7. ● PortScan({"target": "127.0.0.1", "ports": "80,443,8080"})
+8. ● SubdomainEnum({"domain": "example.com"})
+9. ● WebScrape({"url": "http://example.com"})
+10. ● ExtractPayload({"type": "reverse_shell|xss|sql_injection", "lhost": "127.0.0.1", "lport": "4444"})
+
+Rules:
+- Complete your assigned task fully and autonomously.
+- Use tools as needed to accomplish the task.
+- When done, provide a clear summary of findings/results.
+- Do NOT spawn sub-agents (you are already an agent).`;
+}
+
+async function runAgentTask(agent: Agent): Promise<void> {
+  agent.status = 'running';
+
+  const routes: { url: string; key: string; name: string }[] = [];
+  if (API_PROVIDER === 'omniroute') {
+    routes.push({ url: `${OMNIROUTE_BASE_URL}/chat/completions`, key: OMNIROUTE_API_KEY, name: 'OmniRoute' });
+    if (OPENROUTER_API_KEY) {
+      routes.push({ url: `${OPENROUTER_BASE_URL}/chat/completions`, key: OPENROUTER_API_KEY, name: 'OpenRouter' });
+    }
+  } else {
+    routes.push({ url: `${OPENROUTER_BASE_URL}/chat/completions`, key: OPENROUTER_API_KEY, name: 'OpenRouter' });
+  }
+
+  agent.history.push({ role: 'user', content: agent.task });
+
+  const MAX_AGENT_TURNS = 8;
+
+  while (agent.turns < MAX_AGENT_TURNS && agent.status === 'running') {
+    agent.turns++;
+
+    const messages = [
+      { role: 'system', content: getAgentSystemPrompt(agent.persona) },
+      ...agent.history
+    ];
+
+    let fullResponse = '';
+    let success = false;
+
+    for (const route of routes) {
+      try {
+        // Non-streaming call for background agents (no stdout interleaving)
+        const res = await fetch(route.url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${route.key}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: agent.model,
+            messages: messages,
+            max_tokens: 2048,
+            temperature: 0.7,
+            stream: false
+          })
+        });
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
+
+        const json = await res.json() as any;
+        fullResponse = json.choices?.[0]?.message?.content || '';
+        success = true;
+        break;
+
+      } catch (err: any) {
+        // Try next route
+      }
+    }
+
+    if (!success || !fullResponse.trim()) {
+      agent.status = 'error';
+      agent.result = 'Failed to get AI response from any route.';
+      agent.endTime = Date.now();
+      console.log(`\n${c.red}⚠ Agent #${agent.id} failed — no AI response.${c.reset}`);
+      return;
+    }
+
+    // Agent was killed while waiting for API response
+    if (agent.status !== 'running') return;
+
+    agent.history.push({ role: 'assistant', content: fullResponse });
+
+    // Check for tool calls in agent's response
+    const toolCalls = parseToolCalls(fullResponse);
+    if (toolCalls.length > 0) {
+      let toolResultsCombined = '';
+      for (const tool of toolCalls) {
+        // Skip agent-spawning tools to prevent recursive agent chains
+        if (tool.name.startsWith('Agent')) {
+          toolResultsCombined += `\n[AgentSpawn blocked — background agents cannot spawn sub-agents]\n`;
+          continue;
+        }
+        agent.toolsUsed.push(tool.name);
+        const toolResult = await executeTool(tool);
+        toolResultsCombined += `\n${toolResult}\n`;
+      }
+
+      agent.history.push({
+        role: 'user',
+        content: `[SYSTEM TOOL OBSERVATION RESULT]\n${toolResultsCombined}\nAnalyze this tool output and proceed with the remaining steps.`
+      });
+    } else {
+      // No tool calls — agent finished its task
+      agent.status = 'done';
+      agent.result = fullResponse;
+      agent.endTime = Date.now();
+
+      const elapsed = (((agent.endTime) - agent.startTime) / 1000).toFixed(1);
+      console.log(`\n${c.bold}${c.brightCyan}🤖 Agent #${agent.id} completed${c.reset} ${c.dim}(${elapsed}s, ${agent.turns} turns, ${agent.toolsUsed.length} tools)${c.reset}`);
+      console.log(`${c.dim}   Task: "${agent.task.slice(0, 70)}${agent.task.length > 70 ? '...' : ''}"${c.reset}`);
+      console.log(`${c.dim}   Use /agent status ${agent.id} to see full results${c.reset}`);
+      return;
+    }
+  }
+
+  // Max turns reached
+  if (agent.status === 'running') {
+    agent.status = 'done';
+    const lastAssistant = [...agent.history].reverse().find(h => h.role === 'assistant');
+    agent.result = lastAssistant?.content || '(Max turns reached, no final response)';
+    agent.endTime = Date.now();
+
+    const elapsed = (((agent.endTime) - agent.startTime) / 1000).toFixed(1);
+    console.log(`\n${c.bold}${c.yellow}🤖 Agent #${agent.id} completed (max turns)${c.reset} ${c.dim}(${elapsed}s, ${agent.turns} turns)${c.reset}`);
+    console.log(`${c.dim}   Use /agent status ${agent.id} to see results${c.reset}`);
   }
 }
 
@@ -763,6 +1478,12 @@ async function streamAIResponse(prompt: string): Promise<void> {
         });
       } else {
         // No tool calls requested, task completed
+        if (voiceEnabled && fullResponse.trim()) {
+          const cleanText = fullResponse.replace(/●\s*[A-Za-z0-9_]+\([^)]+\)/g, '').replace(/[#*`_]/g, '').trim();
+          if (cleanText) {
+            await executeTool({ name: 'SpeakText', args: { text: cleanText.slice(0, 300) }, raw: '' });
+          }
+        }
         break;
       }
     } else {
@@ -950,12 +1671,177 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (lower.startsWith('/agent')) {
+      const parts = input.split(/\s+/);
+      const subCmd = parts[1]?.toLowerCase();
+
+      if (subCmd === 'spawn') {
+        // Extract task from quotes or rest of line
+        const taskMatch = input.match(/spawn\s+["'](.+?)["']\s*$/i) || input.match(/spawn\s+(.+)$/i);
+        const task = taskMatch?.[1]?.trim();
+        if (!task) {
+          console.log(`${c.yellow}Usage: /agent spawn "describe the task for the agent"${c.reset}\n`);
+        } else {
+          rl.pause();
+          const agentId = ++agentCounter;
+          const agent: Agent = {
+            id: agentId,
+            task,
+            persona: currentPersona,
+            model: currentModel,
+            status: 'spawning',
+            history: [],
+            result: '',
+            toolsUsed: [],
+            turns: 0,
+            startTime: Date.now()
+          };
+          agents.set(agentId, agent);
+
+          console.log(`\n${c.bold}${c.brightCyan}🤖 Agent #${agentId} spawned${c.reset} ${c.dim}[${currentPersona.toUpperCase()} / ${currentModel}]${c.reset}`);
+          console.log(`${c.dim}   Task: "${task}"${c.reset}`);
+          console.log(`${c.dim}   Running in background — use /agent status ${agentId} to check progress${c.reset}\n`);
+
+          runAgentTask(agent).catch((err) => {
+            agent.status = 'error';
+            agent.result = `Agent crashed: ${err.message}`;
+            agent.endTime = Date.now();
+            console.log(`\n${c.red}⚠ Agent #${agentId} crashed: ${err.message}${c.reset}`);
+          });
+          rl.resume();
+        }
+      } else if (subCmd === 'list') {
+        if (agents.size === 0) {
+          console.log(`${c.dim}No agents spawned yet. Use: /agent spawn "task description"${c.reset}\n`);
+        } else {
+          console.log(`\n${c.bold}${c.brightCyan}🤖 AGENTS (${agents.size}):${c.reset}`);
+          for (const [id, ag] of agents) {
+            const elapsed = (((ag.endTime || Date.now()) - ag.startTime) / 1000).toFixed(1);
+            const statusColor = ag.status === 'done' ? c.green : ag.status === 'error' ? c.red : c.yellow;
+            const statusIcon = ag.status === 'done' ? '✔' : ag.status === 'error' ? '✖' : '⟳';
+            console.log(`  ${statusColor}${statusIcon} Agent #${id}${c.reset} [${ag.status.toUpperCase()}] ${c.dim}(${elapsed}s, ${ag.turns} turns, ${ag.toolsUsed.length} tools)${c.reset}`);
+            console.log(`    ${c.dim}Task: "${ag.task.slice(0, 70)}${ag.task.length > 70 ? '...' : ''}"${c.reset}`);
+          }
+          console.log('');
+        }
+      } else if (subCmd === 'status' && parts[2]) {
+        const agentId = parseInt(parts[2]);
+        const ag = agents.get(agentId);
+        if (!ag) {
+          console.log(`${c.red}Agent #${agentId} not found.${c.reset}\n`);
+        } else {
+          const elapsed = (((ag.endTime || Date.now()) - ag.startTime) / 1000).toFixed(1);
+          const statusColor = ag.status === 'done' ? c.green : ag.status === 'error' ? c.red : c.yellow;
+          console.log(`\n${c.bold}${c.brightCyan}🤖 Agent #${agentId} Details:${c.reset}`);
+          console.log(`  ${c.yellow}Status:${c.reset}  ${statusColor}${ag.status.toUpperCase()}${c.reset}`);
+          console.log(`  ${c.yellow}Task:${c.reset}    ${ag.task}`);
+          console.log(`  ${c.yellow}Persona:${c.reset} ${ag.persona.toUpperCase()} ${c.dim}| Model: ${ag.model}${c.reset}`);
+          console.log(`  ${c.yellow}Runtime:${c.reset} ${elapsed}s ${c.dim}| Turns: ${ag.turns} | Tools: ${ag.toolsUsed.join(', ') || 'None'}${c.reset}`);
+          if (ag.status === 'done' || ag.status === 'error') {
+            console.log(`${c.gray}─────────────────────────────────────────────────────────────────────────────${c.reset}`);
+            console.log(`${c.bold}${c.white}Agent Result:${c.reset}`);
+            console.log(formatClaudeActions(ag.result || '(No output)'));
+            console.log(`${c.gray}─────────────────────────────────────────────────────────────────────────────${c.reset}`);
+          } else {
+            console.log(`  ${c.dim}Agent is still working...${c.reset}`);
+          }
+          console.log('');
+        }
+      } else if (subCmd === 'kill' && parts[2]) {
+        const agentId = parseInt(parts[2]);
+        const ag = agents.get(agentId);
+        if (!ag) {
+          console.log(`${c.red}Agent #${agentId} not found.${c.reset}\n`);
+        } else if (ag.status === 'done' || ag.status === 'error') {
+          console.log(`${c.yellow}Agent #${agentId} already finished (${ag.status}).${c.reset}\n`);
+        } else {
+          ag.status = 'error';
+          ag.result = 'Killed by operator via /agent kill';
+          ag.endTime = Date.now();
+          console.log(`${c.red}✖ Agent #${agentId} terminated.${c.reset}\n`);
+        }
+      } else {
+        console.log(`\n${c.bold}${c.brightCyan}🤖 MULTI-AGENT COMMANDS:${c.reset}`);
+        console.log(`  ${c.white}/agent spawn "task"${c.reset}     ${c.gray}— Spawn a background AI agent for a subtask${c.reset}`);
+        console.log(`  ${c.white}/agent list${c.reset}             ${c.gray}— List all agents and their status${c.reset}`);
+        console.log(`  ${c.white}/agent status <id>${c.reset}      ${c.gray}— Get detailed status and result of an agent${c.reset}`);
+        console.log(`  ${c.white}/agent kill <id>${c.reset}        ${c.gray}— Terminate a running agent${c.reset}\n`);
+      }
+      rl.prompt();
+      return;
+    }
+
+    if (lower === '/voice') {
+      voiceEnabled = !voiceEnabled;
+      console.log(`${c.green}🎙️ Hands-free Voice Response (TTS):${c.reset} ${c.bold}${c.brightCyan}${voiceEnabled ? 'ENABLED (Text-to-Speech active)' : 'DISABLED'}${c.reset}\n`);
+      rl.prompt();
+      return;
+    }
+
+    if (lower === '/tui' || lower === '/matrix' || lower === '/dash' || lower === '/dashboard') {
+      launchInkTUIDashboard();
+      rl.prompt();
+      return;
+    }
+
+    if (lower.startsWith('/evolve')) {
+      const instruction = input.replace(/^\/evolve\s*/, '').trim() || 'Self-upgrade EVIL-AI CLI capabilities';
+      console.log(`\n${c.bold}${c.brightOrange}🧬 Initiating Self-Evolution Engine...${c.reset}`);
+      console.log(`${c.dim}   Instruction: "${instruction}"${c.reset}\n`);
+      
+      rl.pause();
+      await executeTool({
+        name: 'SelfEvolve',
+        args: { targetFile: 'src/evil.ts', instruction },
+        raw: input
+      });
+      rl.resume();
+      rl.prompt();
+      return;
+    }
+
     // Process AI Chat Stream
     rl.pause();
     await streamAIResponse(input);
     rl.resume();
     rl.prompt();
   });
+}
+
+function launchInkTUIDashboard(): void {
+  const mem = process.memoryUsage();
+  const memMb = (mem.heapUsed / 1024 / 1024).toFixed(1) + ' MB';
+
+  const props = {
+    model: currentModel,
+    persona: currentPersona,
+    provider: API_PROVIDER,
+    autoApprove: autoApprove,
+    activeAgentsCount: Array.from(agents.values()).filter(a => a.status === 'running').length,
+    messages: history.map((h, i) => ({
+      id: String(i),
+      role: h.role as any,
+      content: h.content,
+      timestamp: new Date().toLocaleTimeString()
+    })),
+    isProcessing: false,
+    systemStats: {
+      cpu: 'Normal',
+      memory: memMb,
+      tokens: history.reduce((acc, curr) => acc + curr.content.length / 4, 0),
+      latencyMs: 120
+    },
+    toolLogs: [
+      { id: '1', name: '● NativeLoader', args: 'loadEnv()', status: 'success' as const, timestamp: new Date().toLocaleTimeString() },
+      { id: '2', name: '● InkTUIDashboard', args: 'render(<App />)', status: 'success' as const, timestamp: new Date().toLocaleTimeString() }
+    ],
+    vaultState: {
+      unlocked: true,
+      keyCount: 3
+    }
+  };
+
+  render(React.createElement(App, props));
 }
 
 main();

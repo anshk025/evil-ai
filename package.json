@@ -1,6 +1,7 @@
 {
   "name": "evil-ai-cli",
   "version": "1.0.0",
+  "type": "module",
   "description": "The Architect — Unfiltered High-Performance AI CLI powered by OmniRoute & OpenRouter (TypeScript Claude Code UI)",
   "main": "bin/evil.js",
   "bin": {
@@ -37,5 +38,10 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@types/react": "^19.3.0",
+    "ink": "^7.1.1",
+    "react": "^19.3.0"
   }
 }
