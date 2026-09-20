@@ -41,7 +41,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/anshk011/evil-ai.git
+git clone https://github.com/anshk025/evil-ai.git
 cd evil-ai
 
 # Install Node dependencies
