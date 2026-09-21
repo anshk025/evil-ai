@@ -49,11 +49,7 @@ MAX_CONVERSATION_HISTORY = None  # Unlimited conversation memory
 
 # Fast Preset Models
 PRESET_MODELS = {
-    "1": "arduino-learn",
-    "2": "deepseek/deepseek-chat",
-    "3": "google/gemini-2.5-flash",
-    "4": "meta-llama/llama-3.3-70b-instruct",
-    "5": "omni-auto"
+    # ADD YOUR MODEL OR COMBOLIST OF OMNIROUTE
 }
 
 # ============ SYSTEM PROMPT (THE SOUL OF VADER-GEM) ============
