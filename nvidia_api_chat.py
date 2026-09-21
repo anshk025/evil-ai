@@ -1,11 +1,6 @@
 """
-VADER-GEM — The Architect | High-Performance AI Telegram Bot
+VADER-GEM 
 Powered by OmniRoute Gateway + OpenRouter (Fast Models: DeepSeek, Gemini, Llama 3)
-- Unified OpenAI-compatible async gateway (OmniRoute + OpenRouter failover)
-- Non-blocking high-throughput Async I/O (httpx)
-- Unfiltered personality system
-- Per-user conversation memory & dynamic model switching
-- Production-Ready
 """
 
 import os
