@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-/**
- * 💀 EVIL-AI — Claude Code Agentic CLI Replica (Full Shadow Security & Agentic Suite)
+/*
  * Powered by OmniRoute Gateway + OpenRouter Failover
  */
 import * as fs from 'fs';
@@ -13,7 +12,7 @@ import * as crypto from 'crypto';
 import React from 'react';
 import { render } from 'ink';
 import { App } from './ui/App.js';
-// Native Zero-Dependency .env Loader
+
 function loadEnv() {
     const envPaths = [
         path.join(process.cwd(), '.env'),
@@ -41,7 +40,7 @@ function loadEnv() {
     }
 }
 loadEnv();
-// Configuration
+//Config
 const API_PROVIDER = (process.env.API_PROVIDER || 'omniroute').toLowerCase();
 const OMNIROUTE_BASE_URL = (process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1').replace(/\/+$/, '');
 const OMNIROUTE_API_KEY = process.env.OMNIROUTE_API_KEY || 'omniroute-default-key';
@@ -55,20 +54,16 @@ let voiceEnabled = false;
 let agentCounter = 0;
 const agents = new Map();
 const PRESET_MODELS = {
-    '1': 'arduino-learn',
-    '2': 'deepseek/deepseek-chat',
-    '3': 'google/gemini-2.5-flash',
-    '4': 'meta-llama/llama-3.3-70b-instruct',
-    '5': 'omni-auto'
+    // ADD YOUR MODEL OR COMBOLIST
 };
-// ANSI Color Palette matching Claude Code & Antigravity IDE
+
 const c = {
     reset: '\x1b[0m',
     bold: '\x1b[1m',
     dim: '\x1b[2m',
     italic: '\x1b[3m',
     underline: '\x1b[4m',
-    // Colors
+    
     orange: '\x1b[38;2;217;119;6m',
     brightOrange: '\x1b[38;2;245;158;11m',
     purple: '\x1b[38;2;147;51;234m',
